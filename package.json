@@ -1,20 +1,15 @@
 {
   "name": "chronicle-empire-server",
   "version": "1.0.0",
-  "description": "NFT Airdrop Server for Chronicle Empire",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
-    "ethers": "^5.7.2",
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "express": "^4.18.2",
+    "thirdweb": "^5.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
