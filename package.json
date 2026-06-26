@@ -8,8 +8,8 @@
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
-    "express": "^4.18.2",
-    "thirdweb": "^5.0.0"
+    "ethers": "^5.7.2",
+    "express": "^4.18.2"
   },
   "engines": {
     "node": ">=18.0.0"
