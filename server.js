@@ -12,7 +12,7 @@ app.use(express.json());
 app.use(cors({ origin: process.env.GAME_URL || "*" }));
 
 const CONTRACT_ADDRESS = "0xb97909780ADBD66cb4b941B0DFAAb0FA9B4Ba2EB";
-const POLYGON_RPC      = "https://polygon-rpc.com";
+const POLYGON_RPC      = "https://polygon-mainnet.g.alchemy.com/v2/demo";
 
 const RARITY_TOKEN = {
   "Common":    1,
