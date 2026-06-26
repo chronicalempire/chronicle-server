@@ -1,71 +1,48 @@
 /* ════════════════════════════════════════════════════════
-   CHRONICLE EMPIRE — NFT Airdrop Server
-   Uses thirdweb SDK for correct contract interaction
+   CHRONICLE EMPIRE — NFT Airdrop Server v3
+   thirdweb ERC-1155 Drop — uses claim() method
    ════════════════════════════════════════════════════════ */
 
-const express  = require("express");
-const cors     = require("cors");
-const { createThirdwebClient, getContract, sendTransaction } = require("thirdweb");
-const { polygon } = require("thirdweb/chains");
-const { privateKeyToAccount } = require("thirdweb/wallets");
-const { mintTo, balanceOf } = require("thirdweb/extensions/erc1155");
+const express = require("express");
+const cors    = require("cors");
+const ethers  = require("ethers");
 require("dotenv").config();
 
 const app = express();
 app.use(express.json());
 app.use(cors({ origin: process.env.GAME_URL || "*" }));
 
-// ── Config ─────────────────────────────────────────────
 const CONTRACT_ADDRESS = "0xb97909780ADBD66cb4b941B0DFAAb0FA9B4Ba2EB";
-
-const TOKEN_IDS = {
-  GOLD:      0n,
-  UNCOMMON:  1n,
-  RARE:      2n,
-  EPIC:      3n,
-  LEGENDARY: 4n,
-  ANCIENT:   5n,
-};
+const POLYGON_RPC      = "https://polygon-rpc.com";
 
 const RARITY_TOKEN = {
-  "Common":    1n,
-  "Uncommon":  1n,
-  "Rare":      2n,
-  "Epic":      3n,
-  "Legendary": 4n,
-  "Ancient":   5n,
+  "Common":    1,
+  "Uncommon":  1,
+  "Rare":      2,
+  "Epic":      3,
+  "Legendary": 4,
+  "Ancient":   5,
 };
 
-// ── thirdweb client ────────────────────────────────────
-const client = createThirdwebClient({
-  secretKey: process.env.THIRDWEB_SECRET_KEY || "",
-});
+// thirdweb ERC-1155 Drop ABI — claim is the correct method
+const ABI = [
+  "function claim(address receiver, uint256 tokenId, uint256 quantity, address currency, uint256 pricePerToken, (bytes32[],uint256,uint256,address) allowlistProof, bytes data) external payable",
+  "function balanceOf(address account, uint256 id) view returns (uint256)",
+];
 
-const account = privateKeyToAccount({
-  client,
-  privateKey: `0x${process.env.OWNER_PRIVATE_KEY}`,
-});
+const provider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
+const signer   = new ethers.Wallet(`0x${process.env.OWNER_PRIVATE_KEY}`, provider);
+const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
 
-const contract = getContract({
-  client,
-  chain: polygon,
-  address: CONTRACT_ADDRESS,
-});
+// Zero address for currency (native token / free)
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const NATIVE_TOKEN = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
-// ── Anti-cheat ─────────────────────────────────────────
+// Anti-cheat
 const mintedBosses = new Map();
+function hasAlreadyMinted(addr, bossId) { return mintedBosses.has(`${addr.toLowerCase()}:${bossId}`); }
+function markAsMinted(addr, bossId) { mintedBosses.set(`${addr.toLowerCase()}:${bossId}`, true); }
 
-function hasAlreadyMinted(playerAddress, bossId) {
-  return mintedBosses.has(`${playerAddress.toLowerCase()}:${bossId}`);
-}
-
-function markAsMinted(playerAddress, bossId) {
-  mintedBosses.set(`${playerAddress.toLowerCase()}:${bossId}`, true);
-}
-
-// ══════════════════════════════════════════════════════
-//  POST /mint-boss
-// ══════════════════════════════════════════════════════
 app.post("/mint-boss", async (req, res) => {
   const { playerAddress, bossId, bossName, rarity } = req.body;
 
@@ -73,23 +50,39 @@ app.post("/mint-boss", async (req, res) => {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
+  if (!ethers.utils.isAddress(playerAddress)) {
+    return res.status(400).json({ error: "Invalid wallet address" });
+  }
+
   if (hasAlreadyMinted(playerAddress, bossId)) {
     return res.status(409).json({ error: "Boss already minted for this wallet" });
   }
 
-  const tokenId = RARITY_TOKEN[rarity] ?? 1n;
+  const tokenId = RARITY_TOKEN[rarity] ?? 1;
 
   try {
     console.log(`Minting: ${bossName} (${rarity}) tokenId:${tokenId} → ${playerAddress}`);
 
-    const transaction = mintTo({
-      contract,
-      to: playerAddress,
-      tokenId,
-      supply: 1n,
-    });
+    const allowlistProof = {
+      proof: [],
+      quantityLimitPerWallet: ethers.constants.MaxUint256,
+      pricePerToken: ethers.constants.MaxUint256,
+      currency: ZERO_ADDRESS,
+    };
 
-    const receipt = await sendTransaction({ transaction, account });
+    const tx = await contract.claim(
+      playerAddress,
+      tokenId,
+      1,
+      NATIVE_TOKEN,
+      0,
+      allowlistProof,
+      "0x",
+      { gasLimit: 500000 }
+    );
+
+    console.log(`TX sent: ${tx.hash}`);
+    const receipt = await tx.wait();
     console.log(`✓ Minted! TX: ${receipt.transactionHash}`);
 
     markAsMinted(playerAddress, bossId);
@@ -97,7 +90,7 @@ app.post("/mint-boss", async (req, res) => {
     return res.json({
       success: true,
       txHash:  receipt.transactionHash,
-      tokenId: tokenId.toString(),
+      tokenId,
       bossName,
       rarity,
       opensea: `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${tokenId}`,
@@ -109,32 +102,24 @@ app.post("/mint-boss", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════
-//  GET /balances/:address
-// ══════════════════════════════════════════════════════
 app.get("/balances/:address", async (req, res) => {
   try {
     const addr = req.params.address;
-    const ids  = Object.values(TOKEN_IDS);
-
-    const balances = await Promise.all(
-      ids.map(id => balanceOf({ contract, owner: addr, tokenId: id }))
-    );
-
+    const ids  = [0, 1, 2, 3, 4, 5];
+    const bals = await Promise.all(ids.map(id => contract.balanceOf(addr, id)));
     return res.json({
-      gold:      balances[0].toString(),
-      uncommon:  balances[1].toString(),
-      rare:      balances[2].toString(),
-      epic:      balances[3].toString(),
-      legendary: balances[4].toString(),
-      ancient:   balances[5].toString(),
+      gold:      bals[0].toString(),
+      uncommon:  bals[1].toString(),
+      rare:      bals[2].toString(),
+      epic:      bals[3].toString(),
+      legendary: bals[4].toString(),
+      ancient:   bals[5].toString(),
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ── Health ──────────────────────────────────────────────
 app.get("/health", (req, res) => {
   res.json({ status: "ok", contract: CONTRACT_ADDRESS });
 });
@@ -143,5 +128,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Chronicle Empire NFT Server on port ${PORT}`);
   console.log(`Contract: ${CONTRACT_ADDRESS}`);
-  console.log(`Account:  ${account.address}`);
+  console.log(`Signer:   ${signer.address}`);
 });
