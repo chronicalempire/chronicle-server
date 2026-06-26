@@ -1,6 +1,5 @@
 /* ════════════════════════════════════════════════════════
-   CHRONICLE EMPIRE — NFT Airdrop Server v3
-   thirdweb ERC-1155 Drop — uses claim() method
+   CHRONICLE EMPIRE — NFT Airdrop Server v4
    ════════════════════════════════════════════════════════ */
 
 const express = require("express");
@@ -24,9 +23,9 @@ const RARITY_TOKEN = {
   "Ancient":   5,
 };
 
-// thirdweb ERC-1155 Drop ABI — claim is the correct method
+// thirdweb ERC-1155 Drop ABI
 const ABI = [
-  "function claim(address receiver, uint256 tokenId, uint256 quantity, address currency, uint256 pricePerToken, (bytes32[],uint256,uint256,address) allowlistProof, bytes data) external payable",
+  "function claim(address receiver, uint256 tokenId, uint256 quantity, address currency, uint256 pricePerToken, tuple(bytes32[] proof, uint256 quantityLimitPerWallet, uint256 pricePerToken, address currency) allowlistProof, bytes data) external payable",
   "function balanceOf(address account, uint256 id) view returns (uint256)",
 ];
 
@@ -34,9 +33,8 @@ const provider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
 const signer   = new ethers.Wallet(`0x${process.env.OWNER_PRIVATE_KEY}`, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
 
-// Zero address for currency (native token / free)
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const NATIVE_TOKEN = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 // Anti-cheat
 const mintedBosses = new Map();
@@ -71,13 +69,13 @@ app.post("/mint-boss", async (req, res) => {
     };
 
     const tx = await contract.claim(
-      playerAddress,
-      tokenId,
-      1,
-      NATIVE_TOKEN,
-      0,
-      allowlistProof,
-      "0x",
+      playerAddress,        // receiver
+      tokenId,              // tokenId
+      1,                    // quantity
+      NATIVE_TOKEN,         // currency
+      0,                    // pricePerToken
+      allowlistProof,       // allowlistProof
+      "0x",                 // data
       { gasLimit: 500000 }
     );
 
