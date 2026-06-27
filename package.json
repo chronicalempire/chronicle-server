@@ -1,6 +1,6 @@
 {
   "name": "chronicle-empire-server",
-  "version": "1.0.0",
+  "version": "6.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,9 +9,10 @@
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "ethers": "^5.7.2",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "thirdweb": "^5.120.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }
