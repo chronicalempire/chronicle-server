@@ -29,6 +29,11 @@ const RAW_PK             = process.env.OWNER_PRIVATE_KEY;
 const THIRDWEB_SECRET    = process.env.THIRDWEB_SECRET_KEY;
 const GAME_URL           = process.env.GAME_URL || "*";
 
+// Разрешённые источники (CORS). GAME_URL можно задать списком через запятую:
+//   https://chronicleempire.com,https://www.chronicleempire.com
+// "*" (или пустое) — разрешить всем.
+const ALLOWED_ORIGINS = GAME_URL.split(",").map(s => s.trim()).filter(Boolean);
+
 if (!POLYGON_RPC)     { console.error("✗ POLYGON_RPC не задан (Alchemy URL, Polygon Mainnet)."); process.exit(1); }
 if (!RAW_PK)          { console.error("✗ OWNER_PRIVATE_KEY не задан."); process.exit(1); }
 if (!THIRDWEB_SECRET) { console.error("✗ THIRDWEB_SECRET_KEY не задан (нужен для claimTo / proof владельца)."); process.exit(1); }
@@ -59,7 +64,12 @@ const readContract = new ethers.Contract(CONTRACT_ADDRESS, READ_ABI, provider);
 /* ─────────────── Express ─────────────── */
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: GAME_URL }));
+
+// CORS: разрешаем либо всем ("*"), либо только источникам из ALLOWED_ORIGINS.
+app.use(cors({
+  origin: ALLOWED_ORIGINS.includes("*") ? "*" : ALLOWED_ORIGINS,
+}));
+console.log(`CORS allowed origins: ${ALLOWED_ORIGINS.includes("*") ? "* (все)" : ALLOWED_ORIGINS.join(", ")}`);
 
 /* ─────────────── Анти-чит (in-memory; на free-Render сбрасывается при сне) ─────────────── */
 const mintedBosses = new Map();
