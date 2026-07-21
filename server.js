@@ -209,32 +209,39 @@ app.post("/mint-boss", async (req, res) => {
 });
 
 /* ════════════════════════════════════════════════
-   POST /wert/create-donation — прямой донат картой,
-   БЕЗ смарт-контракта: крипта после оплаты уходит
-   напрямую на кошелёк проекта (DONATION_ADDRESS).
+   POST /wert/create-donation — донат через Wert NFT Checkout
+   (то есть через смарт-контракт, как и покупка NFT — Wert требует
+   именно верифицированный payable-контракт, обычный кошелёк как
+   sc_address не проходит валидацию, отсюда ошибка "1400 Contract
+   Not Payable", которую ловили раньше).
+   Контракт — ChronicleDonation.sol (см. рядом), с единственной
+   функцией donate() payable, принимающей любую сумму.
    ════════════════════════════════════════════════ */
-const DONATION_ADDRESS = process.env.DONATION_ADDRESS || signer.address; // куда падают донаты
+const DONATION_SC_ADDRESS = process.env.WERT_DONATE_SC_ADDRESS; // адрес задеплоенного ChronicleDonation
+const DONATE_ABI = ["function donate() payable"];
+const donateIface = new ethers.utils.Interface(DONATE_ABI);
 
 app.post("/wert/create-donation", async (req, res) => {
   if (!WERT_PRIVATE_KEY || !WERT_PARTNER_ID)
     return res.status(500).json({ error: "Wert checkout не настроен на сервере (WERT_PRIVATE_KEY/WERT_PARTNER_ID)" });
+  if (!DONATION_SC_ADDRESS)
+    return res.status(500).json({ error: "WERT_DONATE_SC_ADDRESS не задан — сначала задеплой ChronicleDonation.sol" });
 
   const amount = parseFloat(req.body.amount);
   if (!Number.isFinite(amount) || amount <= 0)
     return res.status(400).json({ error: "Invalid amount" });
 
   try {
-    // Библиотека подписи требует sc_address/sc_input_data даже для простого
-    // перевода. Раз получатель — обычный кошелёк (не контракт), передаём
-    // его же адрес и пустые calldata — по факту это просто нативный перевод.
+    const scInputData = donateIface.encodeFunctionData("donate", []);
+
     const signedData = signSmartContractData(
       {
-        address:          DONATION_ADDRESS,
+        address:          req.body.playerAddress || DONATION_SC_ADDRESS, // получатель, если контракт не сможет исполниться — фолбэк
         commodity:        WERT_COMMODITY,
         network:          WERT_NETWORK,
         commodity_amount: amount,
-        sc_address:       DONATION_ADDRESS,
-        sc_input_data:    "0x",
+        sc_address:       DONATION_SC_ADDRESS,
+        sc_input_data:    scInputData,
       },
       WERT_PRIVATE_KEY
     );
@@ -415,7 +422,7 @@ app.listen(PORT, async () => {
   console.log(`Chronicle Empire NFT Server v6 (thirdweb SDK) on port ${PORT}`);
   console.log(`Contract: ${CONTRACT_ADDRESS}`);
   console.log(`Signer:   ${signer.address}`);
-  console.log(`Wert donate:  ${(WERT_PRIVATE_KEY && WERT_PARTNER_ID) ? "ON" : "OFF"}`);
+  console.log(`Wert donate:  ${(WERT_PRIVATE_KEY && WERT_PARTNER_ID && DONATION_SC_ADDRESS) ? "ON" : "OFF (нужен WERT_DONATE_SC_ADDRESS)"}`);
   console.log(`Wert NFT buy: ${WERT_ENABLED ? `ON (${WERT_NETWORK}, sc=${WERT_SC_ADDRESS})` : "OFF (нужен WERT_SC_ADDRESS)"}`);
   try {
     const block = await provider.getBlockNumber();
