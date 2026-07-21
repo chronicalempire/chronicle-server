@@ -224,14 +224,17 @@ app.post("/wert/create-donation", async (req, res) => {
     return res.status(400).json({ error: "Invalid amount" });
 
   try {
-    // Никакого sc_address/sc_input_data — просто прямая покупка крипты,
-    // которая уходит на DONATION_ADDRESS. Смарт-контракт тут не нужен.
+    // Библиотека подписи требует sc_address/sc_input_data даже для простого
+    // перевода. Раз получатель — обычный кошелёк (не контракт), передаём
+    // его же адрес и пустые calldata — по факту это просто нативный перевод.
     const signedData = signSmartContractData(
       {
         address:          DONATION_ADDRESS,
         commodity:        WERT_COMMODITY,
         network:          WERT_NETWORK,
         commodity_amount: amount,
+        sc_address:       DONATION_ADDRESS,
+        sc_input_data:    "0x",
       },
       WERT_PRIVATE_KEY
     );
