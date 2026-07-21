@@ -21,6 +21,9 @@ const { privateKeyToAccount } = require("thirdweb/wallets");
 const { polygon }             = require("thirdweb/chains");
 const { claimTo }             = require("thirdweb/extensions/erc1155");
 
+// Wert NFT Checkout — подпись заказа на бэкенде
+const { signSmartContractData } = require("@wert-io/widget-sc-signer");
+
 /* ─────────────── ENV ─────────────── */
 const CONTRACT_ADDRESS   = "0xb97909780ADBD66cb4b941B0DFAAb0FA9B4Ba2EB";
 const CHAIN_ID           = 137;
@@ -39,6 +42,46 @@ if (!RAW_PK)          { console.error("✗ OWNER_PRIVATE_KEY не задан.");
 if (!THIRDWEB_SECRET) { console.error("✗ THIRDWEB_SECRET_KEY не задан (нужен для claimTo / proof владельца)."); process.exit(1); }
 
 const OWNER_PRIVATE_KEY = RAW_PK.startsWith("0x") ? RAW_PK : `0x${RAW_PK}`;
+
+/* ─────────────── Wert NFT Checkout ───────────────
+   Это ОТДЕЛЬНЫЙ флоу от /mint-boss: тут игрок платит картой через Wert,
+   Wert сам вызывает claim() на контракте (msg.sender = кошелёк Wert),
+   поэтому для этого нужна ПУБЛИЧНАЯ платная claim-фаза (без allowlist).
+   WERT_PRIVATE_KEY — это НЕ блокчейн-ключ, а ключ подписи запроса к Wert API. */
+const WERT_PRIVATE_KEY = process.env.WERT_PRIVATE_KEY;               // ключ подписи (sandbox выдаёт Wert)
+const WERT_PARTNER_ID  = process.env.WERT_PARTNER_ID;                // Partner ID из Wert Dashboard
+const WERT_ORIGIN      = process.env.WERT_ORIGIN  || "https://sandbox.wert.io"; // прод: https://widget.wert.io
+const WERT_NETWORK     = process.env.WERT_NETWORK || "amoy";         // прод: "polygon"
+const WERT_COMMODITY   = process.env.WERT_COMMODITY || "POL";
+const WERT_SC_ADDRESS  = process.env.WERT_SC_ADDRESS;                // адрес контракта В ТОЙ ЖЕ СЕТИ, что WERT_NETWORK
+
+// RPC той сети, где реально исполнится оплата Wert.
+// Sandbox → Amoy (публичный RPC по умолчанию, можно переопределить своим).
+// Прод     → тот же POLYGON_RPC, что и для остального сервера.
+const WERT_RPC_URL = process.env.WERT_RPC_URL
+  || (WERT_NETWORK === "polygon" ? POLYGON_RPC : "https://rpc-amoy.polygon.technology");
+const WERT_CHAIN_ID = WERT_NETWORK === "polygon" ? 137 : 80002; // Amoy chainId
+
+const WERT_ENABLED = !!(WERT_PRIVATE_KEY && WERT_PARTNER_ID && WERT_SC_ADDRESS);
+if (!WERT_ENABLED) {
+  console.warn("⚠ Wert checkout выключен: не заданы WERT_PRIVATE_KEY / WERT_PARTNER_ID / WERT_SC_ADDRESS.");
+}
+
+// ABI вызова claim() у thirdweb DropERC1155 (ERC1155ClaimConditions)
+const CLAIM_ABI = [
+  "function claim(address _receiver, uint256 _tokenId, uint256 _quantity, address _currency, uint256 _pricePerToken, tuple(bytes32[] proof, uint256 quantityLimitPerWallet, uint256 pricePerToken, address currency) _allowlistProof, bytes _data) payable",
+];
+const READ_ABI_WERT = [
+  "function getActiveClaimConditionId(uint256 tokenId) view returns (uint256)",
+  "function getClaimConditionById(uint256 tokenId, uint256 conditionId) view returns (tuple(uint256 startTimestamp, uint256 maxClaimableSupply, uint256 supplyClaimed, uint256 quantityLimitPerWallet, bytes32 merkleRoot, uint256 pricePerToken, address currency, string metadata) condition)",
+];
+const claimIface = new ethers.utils.Interface(CLAIM_ABI);
+const wertProvider = WERT_ENABLED
+  ? new ethers.providers.StaticJsonRpcProvider(WERT_RPC_URL, { chainId: WERT_CHAIN_ID, name: WERT_NETWORK })
+  : null;
+const wertReadContract = WERT_ENABLED
+  ? new ethers.Contract(WERT_SC_ADDRESS, READ_ABI_WERT, wertProvider)
+  : null;
 
 const RARITY_TOKEN = { "Common":1, "Uncommon":1, "Rare":2, "Epic":3, "Legendary":4, "Ancient":5 };
 const NATIVE_TOKEN = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
@@ -166,6 +209,84 @@ app.post("/mint-boss", async (req, res) => {
 });
 
 /* ════════════════════════════════════════════════
+   POST /wert/create-order — подписанные данные для Wert-виджета
+   Игрок платит картой → Wert вызывает claim() от своего кошелька,
+   поэтому цена/валюта берутся из ПУБЛИЧНОЙ claim-фазы контракта,
+   а не из /mint-boss логики (там минтит владелец бесплатно).
+   ════════════════════════════════════════════════ */
+app.post("/wert/create-order", async (req, res) => {
+  if (!WERT_ENABLED)
+    return res.status(500).json({ error: "Wert checkout не настроен на сервере (WERT_PRIVATE_KEY/WERT_PARTNER_ID/WERT_SC_ADDRESS)" });
+
+  const { playerAddress, tokenId } = req.body;
+  if (!playerAddress || !ethers.utils.isAddress(playerAddress))
+    return res.status(400).json({ error: "Invalid wallet address" });
+
+  const tid = parseInt(tokenId, 10);
+  if (!Number.isInteger(tid) || tid < 1 || tid > 5)
+    return res.status(400).json({ error: "Invalid tokenId (ожидается 1-5)" });
+
+  try {
+    // Читаем актуальную ПУБЛИЧНУЮ claim-фазу для tokenId из той же сети,
+    // в которой Wert реально отправит транзакцию (amoy в sandbox, polygon в проде).
+    const cid = await wertReadContract.getActiveClaimConditionId(tid);
+    const c   = await wertReadContract.getClaimConditionById(tid, cid);
+
+    if (c.currency.toLowerCase() !== NATIVE_TOKEN.toLowerCase()) {
+      return res.status(400).json({ error: "Сейчас поддержана только оплата в нативной валюте сети (POL). Для ERC20-цены нужна отдельная настройка commodity." });
+    }
+    if (c.merkleRoot !== ethers.constants.HashZero) {
+      return res.status(400).json({ error: "На этой claim-фазе включён allowlist — Wert не сможет её пройти, фаза должна быть публичной." });
+    }
+
+    const pricePerToken = c.pricePerToken; // BigNumber, в wei
+    const commodityAmount = parseFloat(ethers.utils.formatEther(pricePerToken));
+
+    // Публичный клейм = "пустой" AllowlistProof (см. DropSinglePhase1155.sol)
+    const allowlistProof = {
+      proof: [],
+      quantityLimitPerWallet: 0,
+      pricePerToken: ethers.constants.MaxUint256,
+      currency: ethers.constants.AddressZero,
+    };
+
+    const scInputData = claimIface.encodeFunctionData("claim", [
+      playerAddress,
+      tid,
+      1,
+      NATIVE_TOKEN,
+      pricePerToken,
+      allowlistProof,
+      "0x",
+    ]);
+
+    const signedData = signSmartContractData(
+      {
+        address:           playerAddress,
+        commodity:         WERT_COMMODITY,
+        network:           WERT_NETWORK,
+        commodity_amount:  commodityAmount,
+        sc_address:        WERT_SC_ADDRESS,
+        sc_input_data:     scInputData,
+      },
+      WERT_PRIVATE_KEY
+    );
+
+    return res.json({
+      ...signedData,
+      partner_id: WERT_PARTNER_ID,
+      origin:     WERT_ORIGIN,
+      click_id:   `${playerAddress.slice(2, 8)}-${tid}-${Date.now()}`,
+    });
+
+  } catch (err) {
+    const reason = rawErr(err);
+    console.error("Wert order error:", reason);
+    return res.status(500).json({ error: "Could not build Wert order", reason, hint: hint(reason) });
+  }
+});
+
+/* ════════════════════════════════════════════════
    GET /diagnose/:tokenId  (ethers, read-only)
    ════════════════════════════════════════════════ */
 app.get("/diagnose/:tokenId", async (req, res) => {
@@ -250,6 +371,7 @@ app.listen(PORT, async () => {
   console.log(`Chronicle Empire NFT Server v6 (thirdweb SDK) on port ${PORT}`);
   console.log(`Contract: ${CONTRACT_ADDRESS}`);
   console.log(`Signer:   ${signer.address}`);
+  console.log(`Wert checkout: ${WERT_ENABLED ? `ON (${WERT_NETWORK}, sc=${WERT_SC_ADDRESS})` : "OFF"}`);
   try {
     const block = await provider.getBlockNumber();
     const bal   = await provider.getBalance(signer.address);
