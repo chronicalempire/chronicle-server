@@ -212,30 +212,86 @@ app.post("/mint-boss", async (req, res) => {
    POL/USD rate — fetched server-side (Node 20 has global fetch),
    avoids browser CORS/geo-block issues with CoinGecko/Binance.
    Cached for 60s to avoid hammering the upstream API.
+   Multiple providers, tried in order, since single sources can be
+   geo-blocked (e.g. Binance often blocks US-based server IPs, which
+   is what Render uses) or rate-limited (CoinGecko free tier).
    ════════════════════════════════════════════════ */
-let _polUsdCache = { rate: null, ts: 0 };
+let _polUsdCache = { rate: null, ts: 0 }; // ts=0 means "never fetched"
+
+const RATE_PROVIDERS = [
+  {
+    name: "CoinGecko",
+    url: "https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd",
+    parse: (data) => data["matic-network"]?.usd,
+  },
+  {
+    name: "CoinGecko (POL id)",
+    url: "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd",
+    parse: (data) => data["polygon-ecosystem-token"]?.usd,
+  },
+  {
+    name: "Coinbase",
+    url: "https://api.coinbase.com/v2/prices/MATIC-USD/spot",
+    parse: (data) => parseFloat(data?.data?.amount),
+  },
+  {
+    name: "Kraken",
+    url: "https://api.kraken.com/0/public/Ticker?pair=MATICUSD",
+    parse: (data) => {
+      const result = data?.result;
+      const key = result ? Object.keys(result)[0] : null;
+      return key ? parseFloat(result[key].c[0]) : undefined;
+    },
+  },
+  {
+    name: "Binance",
+    url: "https://api.binance.com/api/v3/ticker/price?symbol=POLUSDT",
+    parse: (data) => parseFloat(data?.price),
+  },
+];
+
+async function fetchWithTimeout(url, ms = 6000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "User-Agent": "chronicle-empire-server/1.0" },
+    });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function getPolUsdRate() {
   const now = Date.now();
   if (_polUsdCache.rate && (now - _polUsdCache.ts) < 60_000) return _polUsdCache.rate;
 
-  try {
-    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd");
-    if (!r.ok) throw new Error(`CoinGecko HTTP ${r.status}`);
-    const data = await r.json();
-    const rate = data["matic-network"]?.usd;
-    if (!rate) throw new Error("CoinGecko: no rate in response");
-    _polUsdCache = { rate, ts: now };
-    return rate;
-  } catch (err) {
-    console.warn("CoinGecko rate fetch failed, trying Binance fallback:", rawErr(err));
-    const r2 = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=POLUSDT");
-    if (!r2.ok) throw new Error(`Binance HTTP ${r2.status}`);
-    const data2 = await r2.json();
-    const rate = parseFloat(data2.price);
-    if (!Number.isFinite(rate)) throw new Error("Binance: no rate in response");
-    _polUsdCache = { rate, ts: now };
-    return rate;
+  const errors = [];
+  for (const provider of RATE_PROVIDERS) {
+    try {
+      const r = await fetchWithTimeout(provider.url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const rate = provider.parse(data);
+      if (!Number.isFinite(rate) || rate <= 0) throw new Error("no usable rate in response");
+      _polUsdCache = { rate, ts: now };
+      return rate;
+    } catch (err) {
+      errors.push(`${provider.name}: ${rawErr(err)}`);
+    }
   }
+
+  console.error("All POL/USD rate providers failed:", errors.join(" | "));
+
+  // Stale cache is better than nothing — serve it with a warning rather
+  // than fully blocking checkout if every live provider is down/blocked.
+  if (_polUsdCache.rate) {
+    console.warn("Serving stale cached POL/USD rate:", _polUsdCache.rate);
+    return _polUsdCache.rate;
+  }
+
+  throw new Error(`All rate providers failed: ${errors.join(" | ")}`);
 }
 
 app.get("/price/pol-usd", async (req, res) => {
