@@ -216,7 +216,7 @@ app.post("/mint-boss", async (req, res) => {
 const DONATION_ADDRESS = process.env.DONATION_ADDRESS || signer.address; // куда падают донаты
 
 app.post("/wert/create-donation", async (req, res) => {
-  if (!WERT_ENABLED)
+  if (!WERT_PRIVATE_KEY || !WERT_PARTNER_ID)
     return res.status(500).json({ error: "Wert checkout не настроен на сервере (WERT_PRIVATE_KEY/WERT_PARTNER_ID)" });
 
   const amount = parseFloat(req.body.amount);
@@ -412,7 +412,8 @@ app.listen(PORT, async () => {
   console.log(`Chronicle Empire NFT Server v6 (thirdweb SDK) on port ${PORT}`);
   console.log(`Contract: ${CONTRACT_ADDRESS}`);
   console.log(`Signer:   ${signer.address}`);
-  console.log(`Wert checkout: ${WERT_ENABLED ? `ON (${WERT_NETWORK}, sc=${WERT_SC_ADDRESS})` : "OFF"}`);
+  console.log(`Wert donate:  ${(WERT_PRIVATE_KEY && WERT_PARTNER_ID) ? "ON" : "OFF"}`);
+  console.log(`Wert NFT buy: ${WERT_ENABLED ? `ON (${WERT_NETWORK}, sc=${WERT_SC_ADDRESS})` : "OFF (нужен WERT_SC_ADDRESS)"}`);
   try {
     const block = await provider.getBlockNumber();
     const bal   = await provider.getBalance(signer.address);
