@@ -209,6 +209,46 @@ app.post("/mint-boss", async (req, res) => {
 });
 
 /* ════════════════════════════════════════════════
+   POL/USD rate — fetched server-side (Node 20 has global fetch),
+   avoids browser CORS/geo-block issues with CoinGecko/Binance.
+   Cached for 60s to avoid hammering the upstream API.
+   ════════════════════════════════════════════════ */
+let _polUsdCache = { rate: null, ts: 0 };
+async function getPolUsdRate() {
+  const now = Date.now();
+  if (_polUsdCache.rate && (now - _polUsdCache.ts) < 60_000) return _polUsdCache.rate;
+
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd");
+    if (!r.ok) throw new Error(`CoinGecko HTTP ${r.status}`);
+    const data = await r.json();
+    const rate = data["matic-network"]?.usd;
+    if (!rate) throw new Error("CoinGecko: no rate in response");
+    _polUsdCache = { rate, ts: now };
+    return rate;
+  } catch (err) {
+    console.warn("CoinGecko rate fetch failed, trying Binance fallback:", rawErr(err));
+    const r2 = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=POLUSDT");
+    if (!r2.ok) throw new Error(`Binance HTTP ${r2.status}`);
+    const data2 = await r2.json();
+    const rate = parseFloat(data2.price);
+    if (!Number.isFinite(rate)) throw new Error("Binance: no rate in response");
+    _polUsdCache = { rate, ts: now };
+    return rate;
+  }
+}
+
+app.get("/price/pol-usd", async (req, res) => {
+  try {
+    const rate = await getPolUsdRate();
+    res.json({ usd: rate });
+  } catch (err) {
+    console.error("Price endpoint error:", rawErr(err));
+    res.status(502).json({ error: "Rate unavailable" });
+  }
+});
+
+/* ════════════════════════════════════════════════
    POST /wert/create-donation — донат через Wert NFT Checkout
    (то есть через смарт-контракт, как и покупка NFT — Wert требует
    именно верифицированный payable-контракт, обычный кошелёк как
@@ -227,7 +267,19 @@ app.post("/wert/create-donation", async (req, res) => {
   if (!DONATION_SC_ADDRESS)
     return res.status(500).json({ error: "WERT_DONATE_SC_ADDRESS не задан — сначала задеплой ChronicleDonation.sol" });
 
-  const amount = parseFloat(req.body.amount);
+  let amount = parseFloat(req.body.amount);       // legacy: amount in POL
+  const amountUsd = parseFloat(req.body.amountUsd); // new: amount in USD, server converts
+
+  if (!Number.isFinite(amount) && Number.isFinite(amountUsd) && amountUsd > 0) {
+    try {
+      const rate = await getPolUsdRate();
+      amount = Number((amountUsd / rate).toFixed(6));
+    } catch (err) {
+      console.error("Rate fetch failed for donation:", rawErr(err));
+      return res.status(502).json({ error: "Could not fetch exchange rate, try again shortly" });
+    }
+  }
+
   if (!Number.isFinite(amount) || amount <= 0)
     return res.status(400).json({ error: "Invalid amount" });
 
