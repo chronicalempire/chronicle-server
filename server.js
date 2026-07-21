@@ -209,6 +209,47 @@ app.post("/mint-boss", async (req, res) => {
 });
 
 /* ════════════════════════════════════════════════
+   POST /wert/create-donation — прямой донат картой,
+   БЕЗ смарт-контракта: крипта после оплаты уходит
+   напрямую на кошелёк проекта (DONATION_ADDRESS).
+   ════════════════════════════════════════════════ */
+const DONATION_ADDRESS = process.env.DONATION_ADDRESS || signer.address; // куда падают донаты
+
+app.post("/wert/create-donation", async (req, res) => {
+  if (!WERT_ENABLED)
+    return res.status(500).json({ error: "Wert checkout не настроен на сервере (WERT_PRIVATE_KEY/WERT_PARTNER_ID)" });
+
+  const amount = parseFloat(req.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0)
+    return res.status(400).json({ error: "Invalid amount" });
+
+  try {
+    // Никакого sc_address/sc_input_data — просто прямая покупка крипты,
+    // которая уходит на DONATION_ADDRESS. Смарт-контракт тут не нужен.
+    const signedData = signSmartContractData(
+      {
+        address:          DONATION_ADDRESS,
+        commodity:        WERT_COMMODITY,
+        network:          WERT_NETWORK,
+        commodity_amount: amount,
+      },
+      WERT_PRIVATE_KEY
+    );
+
+    return res.json({
+      ...signedData,
+      partner_id: WERT_PARTNER_ID,
+      origin:     WERT_ORIGIN,
+      click_id:   `donate-${Date.now()}`,
+    });
+  } catch (err) {
+    const reason = rawErr(err);
+    console.error("Wert donation error:", reason);
+    return res.status(500).json({ error: "Could not build donation order", reason });
+  }
+});
+
+/* ════════════════════════════════════════════════
    POST /wert/create-order — подписанные данные для Wert-виджета
    Игрок платит картой → Wert вызывает claim() от своего кошелька,
    поэтому цена/валюта берутся из ПУБЛИЧНОЙ claim-фазы контракта,
