@@ -211,12 +211,17 @@ app.post("/mint-boss", async (req, res) => {
 /* ════════════════════════════════════════════════
    POL/USD rate — fetched server-side (Node 20 has global fetch),
    avoids browser CORS/geo-block issues with CoinGecko/Binance.
-   Cached for 60s to avoid hammering the upstream API.
-   Multiple providers, tried in order, since single sources can be
-   geo-blocked (e.g. Binance often blocks US-based server IPs, which
-   is what Render uses) or rate-limited (CoinGecko free tier).
+
+   Speed strategy:
+   - All providers are raced in PARALLEL (Promise.any) instead of tried
+     one-by-one — we use whichever answers first, so one slow/dead
+     provider no longer adds to the wait.
+   - Cache TTL is 90s, and a background timer refreshes it every 45s,
+     so in practice almost every request is served instantly from a
+     warm cache instead of waiting on a live network round-trip.
    ════════════════════════════════════════════════ */
 let _polUsdCache = { rate: null, ts: 0 }; // ts=0 means "never fetched"
+const RATE_CACHE_TTL_MS = 90_000;
 
 const RATE_PROVIDERS = [
   {
@@ -250,7 +255,7 @@ const RATE_PROVIDERS = [
   },
 ];
 
-async function fetchWithTimeout(url, ms = 6000) {
+async function fetchWithTimeout(url, ms = 3500) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -263,35 +268,59 @@ async function fetchWithTimeout(url, ms = 6000) {
   }
 }
 
+async function fetchFromProvider(provider) {
+  const r = await fetchWithTimeout(provider.url);
+  if (!r.ok) throw new Error(`${provider.name}: HTTP ${r.status}`);
+  const data = await r.json();
+  const rate = provider.parse(data);
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error(`${provider.name}: no usable rate in response`);
+  return { rate, provider: provider.name };
+}
+
+// Race every provider at once — first valid answer wins, instead of
+// paying each provider's timeout in sequence.
+async function fetchLiveRate() {
+  try {
+    const { rate, provider } = await Promise.any(RATE_PROVIDERS.map(fetchFromProvider));
+    return rate;
+  } catch (aggregateErr) {
+    const reasons = (aggregateErr.errors || []).map(e => e.message).join(" | ");
+    throw new Error(`All rate providers failed: ${reasons}`);
+  }
+}
+
+async function refreshRateCache() {
+  try {
+    const rate = await fetchLiveRate();
+    _polUsdCache = { rate, ts: Date.now() };
+  } catch (err) {
+    console.warn("Background rate refresh failed:", rawErr(err));
+  }
+}
+
+// Warm the cache immediately on boot, then keep it warm in the
+// background so requests almost never hit a live network call.
+refreshRateCache();
+setInterval(refreshRateCache, 45_000);
+
 async function getPolUsdRate() {
   const now = Date.now();
-  if (_polUsdCache.rate && (now - _polUsdCache.ts) < 60_000) return _polUsdCache.rate;
+  if (_polUsdCache.rate && (now - _polUsdCache.ts) < RATE_CACHE_TTL_MS) return _polUsdCache.rate;
 
-  const errors = [];
-  for (const provider of RATE_PROVIDERS) {
-    try {
-      const r = await fetchWithTimeout(provider.url);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      const rate = provider.parse(data);
-      if (!Number.isFinite(rate) || rate <= 0) throw new Error("no usable rate in response");
-      _polUsdCache = { rate, ts: now };
-      return rate;
-    } catch (err) {
-      errors.push(`${provider.name}: ${rawErr(err)}`);
+  try {
+    const rate = await fetchLiveRate();
+    _polUsdCache = { rate, ts: now };
+    return rate;
+  } catch (err) {
+    console.error("POL/USD rate fetch failed:", rawErr(err));
+    // Stale cache is better than nothing — serve it with a warning rather
+    // than fully blocking checkout if every live provider is down/blocked.
+    if (_polUsdCache.rate) {
+      console.warn("Serving stale cached POL/USD rate:", _polUsdCache.rate);
+      return _polUsdCache.rate;
     }
+    throw err;
   }
-
-  console.error("All POL/USD rate providers failed:", errors.join(" | "));
-
-  // Stale cache is better than nothing — serve it with a warning rather
-  // than fully blocking checkout if every live provider is down/blocked.
-  if (_polUsdCache.rate) {
-    console.warn("Serving stale cached POL/USD rate:", _polUsdCache.rate);
-    return _polUsdCache.rate;
-  }
-
-  throw new Error(`All rate providers failed: ${errors.join(" | ")}`);
 }
 
 app.get("/price/pol-usd", async (req, res) => {
